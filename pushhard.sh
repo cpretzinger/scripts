@@ -4,15 +4,27 @@ REPO_NAME=${1:-$(basename "$(pwd)")}
 USERNAME=$(gh api user --jq .login 2>/dev/null)
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
 
-echo "💦 PUSHING HARD (PRIVATE + BRANCH-AWARE) into GitHub as $USERNAME, repo: $REPO_NAME"
+echo "💦 PUSHING HARD (BRANCH-AWARE) into GitHub as $USERNAME, repo: $REPO_NAME"
 echo "🌿 Current branch: $CURRENT_BRANCH"
 
-# ───────────────────────────────────── Branding prompt
-read -p "🌟 Do you want to include the sexy PushHard™ README branding? (y/N): " INCLUDE_BRANDING
-INCLUDE_BRANDING=$(echo "$INCLUDE_BRANDING" | tr '[:upper:]' '[:lower:]')
+# ───────────────────────────────────── Privacy prompt
+read -p "🔒 Do you want to push as a private repository? (Y/n): " PRIVATE_REPO
+PRIVATE_REPO=$(echo "$PRIVATE_REPO" | tr '[:upper:]' '[:lower:]')
+
+if [[ "$PRIVATE_REPO" == "n" || "$PRIVATE_REPO" == "no" ]]; then
+  read -p "⚠️ Confirm you wish to push as a PUBLIC repository? (y/N): " CONFIRM_PUBLIC
+  CONFIRM_PUBLIC=$(echo "$CONFIRM_PUBLIC" | tr '[:upper:]' '[:lower:]')
+  
+  if [[ "$CONFIRM_PUBLIC" != "y" && "$CONFIRM_PUBLIC" != "yes" ]]; then
+    echo "❌ Operation cancelled. Exiting."
+    exit 1
+  fi
+  IS_PRIVATE=false
+else
+  IS_PRIVATE=true
+fi
 
 # ───────────────────────────────────── README
-if [[ "$INCLUDE_BRANDING" == "y" || "$INCLUDE_BRANDING" == "yes" ]]; then
 cat <<EOL > README.md
 # 🚀 $REPO_NAME
 
@@ -27,15 +39,12 @@ Legendary repo. Precision, speed, zero tolerance for git fuckery.
 ---
 
 ## 🧠 Features
-- 🔒 Private by default
+- 🔒 ${IS_PRIVATE:+Private by default}${IS_PRIVATE:+Public by choice}
 - 🧼 Auto-untracks garbage (.env, node_modules)
 - 🐙 Instantly deploys to GitHub
 - 🔁 Handles diverged branches like a Git therapist
 - 💥 README, .gitignore, first commit: **done**
 EOL
-else
-  echo "# $REPO_NAME" > README.md
-fi
 touch README.md            # ensure mtime updated
 
 # ───────────────────────────────────── .gitignore
@@ -69,8 +78,13 @@ fi
 
 # ───────────────────────────────────── Create repo if no origin
 if ! git remote | grep -q origin; then
-  echo "🔒 Creating PRIVATE GitHub repo via gh CLI…"
-  gh repo create "$REPO_NAME" --private --source=. --remote=origin --push
+  if [ "$IS_PRIVATE" = true ]; then
+    echo "🔒 Creating PRIVATE GitHub repo via gh CLI…"
+    gh repo create "$REPO_NAME" --private --source=. --remote=origin --push
+  else
+    echo "🌐 Creating PUBLIC GitHub repo via gh CLI…"
+    gh repo create "$REPO_NAME" --public --source=. --remote=origin --push
+  fi
 else
   echo "🔁 Remote already exists. Checking for updates…"
 
@@ -100,7 +114,35 @@ else
 
   if ! git diff --cached --quiet; then
     echo "📦 Committing updates…"
-    git commit -m "🔁 pushhard: update"
+    
+    # Generate appropriate commit message based on changes
+    CHANGED_FILES=$(git diff --cached --name-status)
+    ADDED_COUNT=$(echo "$CHANGED_FILES" | grep -c "^A")
+    MODIFIED_COUNT=$(echo "$CHANGED_FILES" | grep -c "^M")
+    DELETED_COUNT=$(echo "$CHANGED_FILES" | grep -c "^D")
+    
+    # Create descriptive commit message
+    COMMIT_MSG="🔁 pushhard: "
+    if [[ $ADDED_COUNT -gt 0 ]]; then
+      COMMIT_MSG+="add $ADDED_COUNT file(s) "
+    fi
+    if [[ $MODIFIED_COUNT -gt 0 ]]; then
+      COMMIT_MSG+="update $MODIFIED_COUNT file(s) "
+    fi
+    if [[ $DELETED_COUNT -gt 0 ]]; then
+      COMMIT_MSG+="remove $DELETED_COUNT file(s) "
+    fi
+    
+    # Add some key files to the message if present
+    if echo "$CHANGED_FILES" | grep -q "package.json"; then
+      COMMIT_MSG+="(deps updated) "
+    fi
+    if echo "$CHANGED_FILES" | grep -q "\.js\|\.ts\|\.jsx\|\.tsx"; then
+      COMMIT_MSG+="(code changes) "
+    fi
+    
+    echo "📝 Commit message: $COMMIT_MSG"
+    git commit -m "$COMMIT_MSG"
     git push origin "$CURRENT_BRANCH"
   else
     echo "🟢 Nothing new to commit. Checking README just in case…"
@@ -115,5 +157,43 @@ else
   fi
 fi
 
-echo "✅ Private repo is live at: https://github.com/$USERNAME/$REPO_NAME/tree/$CURRENT_BRANCH"
+VISIBILITY=$([ "$IS_PRIVATE" = true ] && echo "private" || echo "public")
+echo "✅ $VISIBILITY repo is live at: https://github.com/$USERNAME/$REPO_NAME/tree/$CURRENT_BRANCH"
 echo "🔒 PushHard complete. GitHub respected. Swagger intact."
+
+# Update README.md with project summary without overwriting existing content
+if [ -f README.md ]; then
+  # Check if README already has a pushhard tag section
+  if grep -q "<!-- PUSHHARD-TAG -->" README.md; then
+    # Remove the existing pushhard tag section
+    sed -i.bak '/<!-- PUSHHARD-TAG -->/,/<!-- END-PUSHHARD-TAG -->/d' README.md
+    rm -f README.md.bak
+  fi
+  
+  # Get project summary
+  REPO_DESCRIPTION=$(gh repo view "$USERNAME/$REPO_NAME" --json description --jq .description 2>/dev/null || echo "")
+  FILE_COUNT=$(find . -type f -not -path "*/\.*" -not -path "*/node_modules/*" | wc -l | tr -d ' ')
+  LAST_COMMIT=$(git log -1 --pretty=format:"%s" 2>/dev/null || echo "No commits yet")
+  
+  # Append pushhard tag and project summary to README
+  cat <<EOL >> README.md
+
+<!-- PUSHHARD-TAG -->
+## 📊 Project Status
+- Repository: $REPO_NAME
+- Branch: $CURRENT_BRANCH
+- Files: $FILE_COUNT
+- Last Update: $(date "+%Y-%m-%d %H:%M")
+- Last Commit: $LAST_COMMIT
+${REPO_DESCRIPTION:+- Description: $REPO_DESCRIPTION}
+
+> *This section was auto-generated by PushHard™*
+<!-- END-PUSHHARD-TAG -->
+EOL
+fi
+
+# Add pushhard tag to terminal output
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🏷️  PUSHHARD TAG | $(date "+%Y-%m-%d %H:%M") | $REPO_NAME | $CURRENT_BRANCH"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
